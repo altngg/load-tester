@@ -1,0 +1,28 @@
+# Целевая папка сборки Maven (скомпилированные классы и jar)
+target/
+
+# Отчёты нагрузочного тестирования (генерируются при каждом прогоне)
+load-test-report*.json
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# Системные файлы
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Логи
+*.log
+
+# Временные файлы
+*.tmp
+*.bak
