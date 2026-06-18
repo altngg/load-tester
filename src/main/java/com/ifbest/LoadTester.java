@@ -38,10 +38,12 @@ public class LoadTester {
     private static class UserCredential {
         String email;
         String password;
+        String token;
         
-        UserCredential(String email, String password) {
+        UserCredential(String email, String password, String token) {
             this.email = email;
             this.password = password;
+            this.token = token;
         }
     }
 
@@ -109,7 +111,7 @@ public class LoadTester {
         AtomicInteger errorCount = new AtomicInteger(0);
         
         CountDownLatch latch = new CountDownLatch(totalRequests);
-        long testStartTime = System.currentTimeMillis();
+        long testStartTime = System.nanoTime();
         Random random = new Random();
 
         for (int i = 0; i < totalRequests; i++) {
@@ -117,14 +119,14 @@ public class LoadTester {
                 try {
                     UserCredential randomUser = userPool.get(random.nextInt(userPool.size()));
                     
-                    long startTime = System.currentTimeMillis();
+                    long startTime = System.nanoTime();
                     
                     int statusCode = executeScenario(client, baseUrl, JSON, scenario, randomUser, random);
                     
-                    long endTime = System.currentTimeMillis();
-                    long duration = endTime - startTime;
+                    long endTime = System.nanoTime();
+                    long durationMs = (endTime - startTime) / 1_000_000;
                     
-                    responseTimes.add(duration);
+                    responseTimes.add(durationMs);
                     
                     if (statusCode == 200) {
                         successCount.incrementAndGet();
@@ -145,8 +147,8 @@ public class LoadTester {
         }
 
         latch.await();
-        long testEndTime = System.currentTimeMillis();
-        long totalTestTime = testEndTime - testStartTime;
+        long testEndTime = System.nanoTime();
+        long totalTestTimeMs = (testEndTime - testStartTime) / 1_000_000;
         
         executor.shutdown();
 
@@ -163,12 +165,12 @@ public class LoadTester {
         double p95 = MetricsCalculator.calculatePercentile(sortedTimes, 95);
         double p99 = MetricsCalculator.calculatePercentile(sortedTimes, 99);
 
-        double rps = MetricsCalculator.calculateRps(totalRequests, totalTestTime);
+        double rps = MetricsCalculator.calculateRps(totalRequests, totalTestTimeMs);
 
         long slaCompliantCount = sortedTimes.stream()
                 .filter(time -> time <= finalSlaThreshold)
                 .count();
-        double slaCompliancePercent = (slaCompliantCount * 100.0) / totalRequests;
+        double slaCompliancePercent = MetricsCalculator.calculateSlaCompliancePercent(sortedTimes, finalSlaThreshold);
         boolean slaMet = MetricsCalculator.checkSla(p95, finalSlaThreshold);
 
         System.out.println();
@@ -177,7 +179,7 @@ public class LoadTester {
         System.out.println("Всего запросов: " + totalRequests);
         System.out.println("Успешных: " + successCount.get());
         System.out.println("Ошибок: " + errorCount.get());
-        System.out.println("Общее время теста: " + totalTestTime + " мс");
+        System.out.println("Общее время теста: " + totalTestTimeMs + " мс");
         System.out.println();
         System.out.println("Время ответа:");
         System.out.println("  Минимальное: " + minTime + " мс");
@@ -212,7 +214,7 @@ public class LoadTester {
         report.addProperty("totalRequests", totalRequests);
         report.addProperty("successCount", successCount.get());
         report.addProperty("errorCount", errorCount.get());
-        report.addProperty("totalTestTimeMs", totalTestTime);
+        report.addProperty("totalTestTimeMs", totalTestTimeMs);
         report.addProperty("minTimeMs", minTime);
         report.addProperty("maxTimeMs", maxTime);
         report.addProperty("avgTimeMs", avgTime);
@@ -248,8 +250,13 @@ public class LoadTester {
             boolean registered = registerUser(client, baseUrl, JSON, randomEmail, TEST_PASSWORD);
             
             if (registered) {
-                users.add(new UserCredential(randomEmail, TEST_PASSWORD));
-                System.out.println("  Создан: " + randomEmail);
+                String token = getToken(client, baseUrl, JSON, randomEmail, TEST_PASSWORD);
+                if (token != null) {
+                    users.add(new UserCredential(randomEmail, TEST_PASSWORD, token));
+                    System.out.println("  Создан: " + randomEmail);
+                } else {
+                    System.out.println("  Не удалось получить токен для: " + randomEmail);
+                }
             } else {
                 System.out.println("  Не удалось создать: " + randomEmail);
             }
@@ -287,7 +294,7 @@ public class LoadTester {
             case "login":
                 return executeLoginScenario(client, baseUrl, JSON, user);
             case "videos":
-                return executeVideosScenario(client, baseUrl, JSON, user, random);
+                return executeVideosScenario(client, baseUrl, user, random);
             case "search":
                 return executeSearchScenario(client, baseUrl, JSON, user, random);
             default:
@@ -311,16 +318,13 @@ public class LoadTester {
         return code;
     }
 
-    private static int executeVideosScenario(OkHttpClient client, String baseUrl, MediaType JSON, UserCredential user, Random random) throws IOException {
-        String token = getToken(client, baseUrl, JSON, user.email, user.password);
-        if (token == null) return 401;
-        
+    private static int executeVideosScenario(OkHttpClient client, String baseUrl, UserCredential user, Random random) throws IOException {
         int page = 1 + random.nextInt(5);
         int pageSize = 10 + random.nextInt(40);
         
         Request request = new Request.Builder()
                 .url(baseUrl + "/api/videos?page=" + page + "&page_size=" + pageSize)
-                .addHeader("Authorization", "Bearer " + token)
+                .addHeader("Authorization", "Bearer " + user.token)
                 .get()
                 .build();
 
@@ -332,9 +336,6 @@ public class LoadTester {
     }
 
     private static int executeSearchScenario(OkHttpClient client, String baseUrl, MediaType JSON, UserCredential user, Random random) throws IOException {
-        String token = getToken(client, baseUrl, JSON, user.email, user.password);
-        if (token == null) return 401;
-        
         String query = SEARCH_QUERIES[random.nextInt(SEARCH_QUERIES.length)];
         String mode = MODES[random.nextInt(MODES.length)];
         int page = 1 + random.nextInt(3);
@@ -348,7 +349,7 @@ public class LoadTester {
         RequestBody searchRequestBody = RequestBody.create(JSON, searchJson);
         Request searchRequest = new Request.Builder()
                 .url(baseUrl + "/api/search")
-                .addHeader("Authorization", "Bearer " + token)
+                .addHeader("Authorization", "Bearer " + user.token)
                 .addHeader("Content-Type", "application/json")
                 .post(searchRequestBody)
                 .build();
